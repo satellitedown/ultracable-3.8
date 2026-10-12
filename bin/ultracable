@@ -1,0 +1,234 @@
+#!/usr/bin/env bash
+#
+# ultracable — the UltraCable 3.8 CLI.
+#
+# UltraCable 3.8 is an art project. This tool verifies and prints *stock*
+# firmware images and simulates flashing. It never opens a device node and
+# cannot write firmware anywhere.
+#
+set -euo pipefail
+
+VERSION="3.8.0"
+ULTRACABLE_HOME="${ULTRACABLE_HOME:-$HOME/.ultracable}"
+SRC="${ULTRACABLE_SRC:-$ULTRACABLE_HOME/src}"
+STOCK_DIR="$SRC/stock/3.2.0"
+STOCK_IMG="$STOCK_DIR/a2363_upd_img.bin"
+STOCK_SHA="2dd5a383918b1a0eb88f5ba0f9399fd1442fd84af674119c3314cfcef6a0ff5d"
+REPO_SLUG="${ULTRACABLE_REPO:-satellitedown/ultracable-3.8}"
+
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+	B=$'\033[1m'; D=$'\033[2m'; R=$'\033[31m'; G=$'\033[32m'; Y=$'\033[33m'; Z=$'\033[0m'
+else
+	B=""; D=""; R=""; G=""; Y=""; Z=""
+fi
+
+die() { printf '%serror:%s %s\n' "$R" "$Z" "$*" >&2; exit 1; }
+say() { printf '%s==>%s %s\n' "$G" "$Z" "$*"; }
+warn() { printf '%swarn:%s %s\n' "$Y" "$Z" "$*" >&2; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+need_stock() {
+	[ -f "$STOCK_IMG" ] || die "stock firmware not found at $STOCK_IMG — run: ultracable update"
+}
+
+sha256_of() {
+	if have sha256sum; then
+		sha256sum "$1" | awk '{print $1}'
+	elif have shasum; then
+		shasum -a 256 "$1" | awk '{print $1}'
+	else
+		die "sha256sum or shasum is required"
+	fi
+}
+
+banner() {
+	cat <<'EOF'
+   ╔═══════════════════════════════════════╗
+   ║   U L T R A C A B L E   3 . 8         ║
+   ║   the cable is the computer           ║
+   ╚═══════════════════════════════════════╝
+EOF
+}
+
+cmd_help() {
+	banner
+	cat <<EOF
+
+  usage: ultracable <command> [options]
+
+  commands
+    doctor                 check your machine, the stock firmware, the flasher
+    hash                   sha256 the stock image and compare
+    dump [--offset O] [--length N]   hexdump the stock image
+    strings [N]            print strings from the stock image
+    flash [--simulate]     flash your cable
+    update                 install the latest $REPO_SLUG
+    uninstall [--yes]      remove the CLI and $ULTRACABLE_HOME
+    banner, version, help
+
+  FLASH AT YOUR OWN RISK. The author accepts no liability.
+  UltraCable 3.8 does not write firmware. See the README.
+
+EOF
+}
+
+cmd_doctor() {
+	say "ultracable doctor"
+	printf '\n'
+	printf '  [ok] platform           %s %s\n' "$(uname -s)" "$(uname -m)"
+	if have curl; then
+		printf '  [ok] curl               %s\n' "$(curl --version | head -n 1 | awk '{print $2}')"
+	else
+		printf '  [!!] curl               missing\n'
+	fi
+	if [ -f "$STOCK_IMG" ]; then
+		if [ "$(sha256_of "$STOCK_IMG")" = "$STOCK_SHA" ]; then
+			printf '  [ok] stock firmware     %s (%s bytes, sha256 verified)\n' "$(basename "$STOCK_IMG")" "$(wc -c <"$STOCK_IMG" | tr -d ' ')"
+		else
+			printf '  [!!] stock firmware     sha256 mismatch (expected %s...)\n' "${STOCK_SHA:0:16}"
+		fi
+	else
+		printf '  [!!] stock firmware     not installed\n'
+	fi
+	if [ -n "${ULTRACABLE_FLASHER:-}" ] && [ -e "${ULTRACABLE_FLASHER}" ]; then
+		printf '  [ok] flasher            %s\n' "$ULTRACABLE_FLASHER"
+		printf '\n  %snote:%s the Ultracable Flasher is not wired to anything, and Ultracable 3.8\n  firmware does not exist. This is a parody.\n' "$Y" "$Z"
+	else
+		printf '  [!!] flasher            not detected\n'
+	fi
+	printf '\n'
+}
+
+cmd_hash() {
+	need_stock
+	say "sha256 $(basename "$STOCK_IMG")"
+	ACTUAL="$(sha256_of "$STOCK_IMG")"
+	printf '  expected  %s\n  actual    %s\n' "$STOCK_SHA" "$ACTUAL"
+	if [ "$ACTUAL" = "$STOCK_SHA" ]; then
+		printf '\n  %sVERIFIED%s — stock 3.2.0, untouched. Not for long.\n\n' "$G" "$Z"
+	else
+		printf '\n  %sMISMATCH%s — that is not the stock image.\n\n' "$R" "$Z"
+		exit 1
+	fi
+}
+
+cmd_dump() {
+	need_stock
+	OFFSET="0x13106"
+	LENGTH=128
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--offset) OFFSET="${2:?--offset needs a value}"; shift 2 ;;
+			--length) LENGTH="${2:?--length needs a value}"; shift 2 ;;
+			*) die "unknown option: $1" ;;
+		esac
+	done
+	say "hexdump -C $(basename "$STOCK_IMG") — offset $OFFSET ($((OFFSET)) bytes in)"
+	od -A x -t x1z -j "$((OFFSET))" -N "$LENGTH" "$STOCK_IMG"
+}
+
+cmd_strings() {
+	need_stock
+	LIMIT="${1:-40}"
+	if have strings; then
+		LC_ALL=C strings -n 8 "$STOCK_IMG" | LC_ALL=C grep -aE '^[ -~]{8,}$' | sort -u | head -n "$LIMIT"
+	else
+		warn "'strings' not found — printing the highlight list instead"
+		cat <<'EOF'
+Machine hard fault exception:      @ 0x13057
+dumping core...                    @ 0x130b3
+Thread table exhausted.            @ 0x130ee
+Kernel panic:                      @ 0x13106
+Lock fault                         @ 0x13115
+spm_host_src_in_contract           @ 0x1314f
+apple_uvdm_state_operation         @ 0x131fe
+cm_host_present                    @ 0x1328a
+"com.apple.ChargingCable.connectAnalytics": {   @ 0x132b8
+"HostConnectCount": %u,            @ 0x13308
+"OverTempFault": %u,               @ 0x13352
+Apple Inc.USB-C to MagSafe 3 Cable (2 m)        @ 0x13f61
+EOF
+	fi
+}
+
+cmd_flash() {
+	SIMULATE=0
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--simulate | -s) SIMULATE=1; shift ;;
+			-y | --yes) shift ;;
+			*) die "unknown option: $1 (try: ultracable flash --simulate)" ;;
+		esac
+	done
+	banner
+	if [ "$SIMULATE" = 0 ]; then
+		if [ -n "${ULTRACABLE_FLASHER:-}" ] && [ -e "${ULTRACABLE_FLASHER}" ]; then
+			die "refusing to write to $ULTRACABLE_FLASHER: Ultracable 3.8 firmware does not exist. This is an art project. Use --simulate."
+		fi
+		printf '\n  No Ultracable Flasher detected.\n\n'
+		printf '  Connect the flasher (USB-C, sold out, imaginary) and retry. Or:\n\n'
+		printf '      %sultracable flash --simulate%s\n\n' "$B" "$Z"
+		exit 1
+	fi
+	need_stock
+	say "flashing $(basename "$STOCK_IMG") → Ultracable 3.8"
+	I=0
+	COLS=40
+	while [ "$I" -le "$COLS" ]; do
+		FILLED="$(printf '%*s' "$I" '' | tr ' ' '#')"
+		EMPTY="$(printf '%*s' "$((COLS - I))" '' | tr ' ' '.')"
+		printf '\r  [%s%s] %3d%%' "$FILLED" "$EMPTY" "$((I * 100 / COLS))"
+		sleep 0.04 2>/dev/null || true
+		I=$((I + 1))
+	done
+	printf '\n'
+	printf '  %sverified%s — 0 bytes written, 0 devices opened.\n\n' "$G" "$Z"
+	printf '  Simulation complete. Your cable is exactly as it was. (See README → Liability.)\n\n'
+}
+
+cmd_update() {
+	have curl || die "curl is required"
+	say "updating Ultracable from $REPO_SLUG@main"
+	curl -fsSL "https://raw.githubusercontent.com/$REPO_SLUG/main/install.sh" | bash
+}
+
+cmd_uninstall() {
+	ASSUME_YES=0
+	[ "${1:-}" = "--yes" ] && ASSUME_YES=1
+	SELF="$(command -v ultracable || true)"
+	printf '  this removes:\n'
+	printf '    %s\n' "${SELF:-<ultracable is not on PATH>}"
+	printf '    %s\n' "$ULTRACABLE_HOME"
+	if [ "$ASSUME_YES" = 0 ]; then
+		printf '\n  type "yes" to continue: '
+		read -r ANSWER
+		[ "$ANSWER" = "yes" ] || die "aborted"
+	fi
+	if [ -n "${SELF:-}" ]; then
+		rm -f "$SELF"
+	fi
+	rm -rf "$ULTRACABLE_HOME"
+	say "uninstalled. the cable remains."
+}
+
+main() {
+	CMD="${1:-help}"
+	if [ $# -gt 0 ]; then
+		shift
+	fi
+	case "$CMD" in
+		help | -h | --help) cmd_help ;;
+		banner) banner ;;
+		version | -v | --version) printf 'ultracable %s\n' "$VERSION" ;;
+		doctor) cmd_doctor ;;
+		hash) cmd_hash ;;
+		dump) cmd_dump "$@" ;;
+		strings) cmd_strings "$@" ;;
+		flash) cmd_flash "$@" ;;
+		update) cmd_update ;;
+		uninstall) cmd_uninstall "$@" ;;
+		*) die "unknown command: $CMD (try: ultracable help)" ;;
+	esac
+}
+
+main "$@"
